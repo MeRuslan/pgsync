@@ -19,6 +19,27 @@ class QueryBuilder(object):
         self.isouter: bool = True
         self._cache: dict = {}
 
+    @staticmethod
+    def _normalize_fk_columns(columns) -> List[str]:
+        if columns is None:
+            return []
+        if isinstance(columns, str):
+            return [columns]
+        return list(columns)
+
+    def _ensure_matching_foreign_key_columns(
+        self,
+        left_columns: List[str],
+        right_columns: List[str],
+        left_table: str,
+        right_table: str,
+    ) -> None:
+        if len(left_columns) != len(right_columns):
+            raise ForeignKeyError(
+                f"Mismatched foreign key columns between {left_table} and "
+                f"{right_table}: {left_columns} != {right_columns}"
+            )
+
     def _build_filters(
         self, filters: Dict[str, List[dict]], node: Node
     ) -> Optional[sa.sql.elements.BooleanClauseList]:
@@ -89,25 +110,33 @@ class QueryBuilder(object):
         if (node_a, node_b) not in self._cache:
 
             foreign_keys: dict = {}
-            # if either offers a foreign_key via relationship, use it!
-            if (
-                node_a.relationship.foreign_key.parent
-                or node_b.relationship.foreign_key.parent
-            ):
-                if node_a.relationship.foreign_key.parent:
-                    foreign_keys[node_a.parent.name] = sorted(
-                        node_a.relationship.foreign_key.parent
+            # if either offers explicit foreign_key via relationship, use it
+            explicit_fk_nodes: list = []
+            for node in (node_a, node_b):
+                parent = self._normalize_fk_columns(
+                    node.relationship.foreign_key.parent
+                )
+                child = self._normalize_fk_columns(
+                    node.relationship.foreign_key.child
+                )
+                if parent or child:
+                    explicit_fk_nodes.append((node, parent, child))
+
+            if explicit_fk_nodes:
+                for node, parent, child in explicit_fk_nodes:
+                    if node.parent is None:
+                        raise ForeignKeyError(
+                            "Explicit foreign_key relationship requires "
+                            f"a parent node on {node.name}"
+                        )
+                    self._ensure_matching_foreign_key_columns(
+                        parent,
+                        child,
+                        node.parent.name,
+                        node.name,
                     )
-                    foreign_keys[node_a.name] = sorted(
-                        node_a.relationship.foreign_key.child
-                    )
-                if node_b.relationship.foreign_key.parent:
-                    foreign_keys[node_b.parent.name] = sorted(
-                        node_b.relationship.foreign_key.parent
-                    )
-                    foreign_keys[node_b.name] = sorted(
-                        node_b.relationship.foreign_key.child
-                    )
+                    foreign_keys[node.parent.name] = parent
+                    foreign_keys[node.name] = child
 
             else:
                 fkeys: dict = defaultdict(list)
@@ -730,11 +759,18 @@ class QueryBuilder(object):
                 table=table,
                 schema=child.schema,
             )
+            parent_foreign_key_columns: list = foreign_keys[node.name]
+            self._ensure_matching_foreign_key_columns(
+                foreign_key_columns,
+                parent_foreign_key_columns,
+                child.name,
+                node.name,
+            )
 
             for i in range(len(foreign_key_columns)):
                 onclause.append(
                     child._subquery.c[foreign_key_columns[i]]
-                    == node.model.c[foreign_keys[node.name][i]]
+                    == node.model.c[parent_foreign_key_columns[i]]
                 )
 
             if from_obj is None:
@@ -852,6 +888,12 @@ class QueryBuilder(object):
             foreign_keys,
             table=node.parent.table,
             schema=node.parent.schema,
+        )
+        self._ensure_matching_foreign_key_columns(
+            foreign_key_columns,
+            parent_foreign_key_columns,
+            node.name,
+            node.parent.name,
         )
         where: list = []
         for i in range(len(foreign_key_columns)):

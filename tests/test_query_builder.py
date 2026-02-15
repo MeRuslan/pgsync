@@ -2,6 +2,7 @@
 import pytest
 
 from pgsync.base import Base
+from pgsync.exc import ForeignKeyError
 from pgsync.node import Node
 from pgsync.querybuilder import QueryBuilder
 
@@ -81,6 +82,50 @@ class TestQueryBuilder(object):
 
     def test__get_child_keys(self):
         pass
+
+    def test_get_foreign_keys_respects_explicit_fk_order(self, connection):
+        pg_base = Base(connection.engine.url.database)
+        query_builder = QueryBuilder()
+
+        root = Node(
+            models=pg_base.models,
+            table="book",
+            schema="public",
+        )
+        child = Node(
+            models=pg_base.models,
+            table="user",
+            schema="public",
+            parent=root,
+            relationship={
+                "type": "one_to_one",
+                "variant": "object",
+                "foreign_key": {
+                    "parent": ["seller_id", "buyer_id"],
+                    "child": ["id", "id"],
+                },
+            },
+        )
+
+        foreign_keys = query_builder.get_foreign_keys(root, child)
+        assert foreign_keys[root.name] == ["seller_id", "buyer_id"]
+        assert foreign_keys[child.name] == ["id", "id"]
+
+    def test_ensure_matching_foreign_key_columns_raises(self):
+        query_builder = QueryBuilder()
+
+        with pytest.raises(ForeignKeyError) as excinfo:
+            query_builder._ensure_matching_foreign_key_columns(
+                ["subscription_id", "subscriber_id"],
+                ["id"],
+                "public.user_subscription",
+                "public.user",
+            )
+
+        assert (
+            "Mismatched foreign key columns between "
+            "public.user_subscription and public.user"
+        ) in str(excinfo.value)
 
     def test__root(self):
         pass
